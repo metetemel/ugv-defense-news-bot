@@ -1,115 +1,178 @@
 import feedparser
-import os
+import hashlib
 
-from sources import UGV_RSS, EO_IR_RSS
+from sources import UGV_RSS, EO_IR_RSS, TR_DEFENSE_RSS, UAS_UGV_CROSSOVER_RSS
 from telegram import send
 
 
-# ----------------------------
-# KEYWORD INTELLIGENCE ENGINE
-# ----------------------------
+# =========================
+# KEYWORDS (INTELLIGENCE MODEL)
+# =========================
+
 UGV_KEYWORDS = [
-    "ugv", "unmanned ground", "ground vehicle",
-    "autonomous vehicle", "robotic vehicle"
+    "ugv", "ground vehicle", "unmanned ground",
+    "autonomous vehicle", "robotic vehicle", "land robot"
 ]
 
-CAMERA_KEYWORDS = [
-    "eo/ir", "infrared", "thermal", "tactical camera",
-    "electro-optical", "sensor", "surveillance"
+EOIR_KEYWORDS = [
+    "eo/ir", "electro-optical", "infrared", "thermal",
+    "camera", "sensor", "surveillance", "imaging"
 ]
 
-MILITARY_KEYWORDS = [
-    "military", "defense", "army", "combat", "tactical"
+STRATEGIC_KEYWORDS = [
+    "combat", "military", "army", "defense",
+    "tactical", "battlefield"
+]
+
+HIGH_VALUE_ENTITIES = [
+    "rheinmetall", "aselsan", "qinetiq",
+    "bae systems", "knds", "general dynamics"
 ]
 
 
-# ----------------------------
-# SCORING SYSTEM
-# ----------------------------
-def score_item(text):
+# =========================
+# NORMALIZE TITLE
+# =========================
+def normalize(text):
+    return " ".join(text.lower().split())
+
+
+# =========================
+# DEDUP KEY (HASH BASED)
+# =========================
+def make_hash(title):
+    return hashlib.md5(title.encode("utf-8")).hexdigest()
+
+
+# =========================
+# SCORING v2
+# =========================
+def score(text):
     text = text.lower()
 
-    score = 0
+    s = 0
 
+    # UGV relevance
     for k in UGV_KEYWORDS:
         if k in text:
-            score += 3
+            s += 4
 
-    for k in CAMERA_KEYWORDS:
+    # EO/IR relevance
+    for k in EOIR_KEYWORDS:
         if k in text:
-            score += 2
+            s += 3
 
-    for k in MILITARY_KEYWORDS:
+    # Military context
+    for k in STRATEGIC_KEYWORDS:
         if k in text:
-            score += 1
+            s += 2
 
-    return score
+    # High-value companies boost
+    for k in HIGH_VALUE_ENTITIES:
+        if k in text:
+            s += 5
+
+    return s
 
 
-# ----------------------------
+# =========================
 # FETCH RSS
-# ----------------------------
-def fetch(urls):
+# =========================
+def fetch(urls, source_name):
     items = []
 
     for url in urls:
         feed = feedparser.parse(url)
 
-        for e in feed.entries[:10]:
-            text = (e.title + " " + getattr(e, "summary", "")).lower()
+        for e in feed.entries[:15]:
+            title = normalize(e.title)
+            summary = normalize(getattr(e, "summary", ""))
+
+            full_text = title + " " + summary
 
             items.append({
+                "id": make_hash(title),
                 "title": e.title,
                 "link": e.link,
-                "score": score_item(text)
+                "score": score(full_text),
+                "source": source_name
             })
 
     return items
 
 
-# ----------------------------
-# BUILD REPORT
-# ----------------------------
+# =========================
+# DEDUPLICATION ENGINE
+# =========================
+def deduplicate(items):
+    seen = {}
+    merged = {}
+
+    for item in items:
+        _id = item["id"]
+
+        if _id not in seen:
+            seen[_id] = True
+            merged[_id] = item
+        else:
+            # duplicate found → boost score
+            merged[_id]["score"] += 2
+
+    return list(merged.values())
+
+
+# =========================
+# REPORT BUILDER
+# =========================
 def build_report(items):
     items = sorted(items, key=lambda x: x["score"], reverse=True)
 
-    report = "🛡️ GÜNLÜK UGV & TAKTİK SİSTEM BÜLTENİ\n\n"
+    report = "🛡️ UGV INTELLIGENCE REPORT v2\n\n"
 
     count = 0
 
-    for item in items:
-        if item["score"] < 3:
+    for i in items:
+        if i["score"] < 5:
             continue
 
         count += 1
 
-        report += f"🔹 {item['title']}\n"
-        report += f"📊 Önem Skoru: {item['score']}\n"
-        report += f"🔗 {item['link']}\n\n"
+        report += f"🔹 {i['title']}\n"
+        report += f"📊 Intelligence Score: {i['score']}\n"
+        report += f"🌐 Source: {i['source']}\n"
+        report += f"🔗 {i['link']}\n\n"
 
-        if count >= 10:
+        if count >= 12:
             break
 
     if count == 0:
-        report += "Bugün yüksek öncelikli UGV / sensör haberi bulunamadı.\n"
+        report += "No high-value intelligence signals today.\n"
 
     return report
 
 
-# ----------------------------
-# MAIN
-# ----------------------------
+# =========================
+# MAIN PIPELINE
+# =========================
 def run():
-    print("bot started")
+    print("UGV INTEL v2 starting...")
 
-    ugv = fetch(UGV_RSS)
-    eo = fetch(EO_IR_RSS)
+    all_items = []
 
-    all_items = ugv + eo
+    all_items += fetch(UGV_RSS, "UGV")
+    all_items += fetch(EO_IR_RSS, "EOIR")
+    all_items += fetch(TR_DEFENSE_RSS, "TR")
+    all_items += fetch(UAS_UGV_CROSSOVER_RSS, "UAS")
 
-    print(f"items collected: {len(all_items)}")
+    print(f"raw items: {len(all_items)}")
 
-    report = build_report(all_items)
+    # DEDUP STEP
+    clean_items = deduplicate(all_items)
+
+    print(f"after dedup: {len(clean_items)}")
+
+    # REPORT
+    report = build_report(clean_items)
 
     send(report)
 
