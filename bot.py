@@ -1,87 +1,120 @@
-import os
 import feedparser
-import requests
+import os
 
 from sources import UGV_RSS, EO_IR_RSS
-from llm import generate_brief
 from telegram import send
 
 
-# ---------------------------
-# 1. DEBUG HELPERS
-# ---------------------------
-def log(step):
-    print(f"[UGV BOT] {step}")
+# ----------------------------
+# KEYWORD INTELLIGENCE ENGINE
+# ----------------------------
+UGV_KEYWORDS = [
+    "ugv", "unmanned ground", "ground vehicle",
+    "autonomous vehicle", "robotic vehicle"
+]
+
+CAMERA_KEYWORDS = [
+    "eo/ir", "infrared", "thermal", "tactical camera",
+    "electro-optical", "sensor", "surveillance"
+]
+
+MILITARY_KEYWORDS = [
+    "military", "defense", "army", "combat", "tactical"
+]
 
 
-# ---------------------------
-# 2. RSS FETCH
-# ---------------------------
-def fetch_rss(urls, tag):
-    log(f"{tag} RSS fetching started")
+# ----------------------------
+# SCORING SYSTEM
+# ----------------------------
+def score_item(text):
+    text = text.lower()
 
-    news = []
+    score = 0
+
+    for k in UGV_KEYWORDS:
+        if k in text:
+            score += 3
+
+    for k in CAMERA_KEYWORDS:
+        if k in text:
+            score += 2
+
+    for k in MILITARY_KEYWORDS:
+        if k in text:
+            score += 1
+
+    return score
+
+
+# ----------------------------
+# FETCH RSS
+# ----------------------------
+def fetch(urls):
+    items = []
 
     for url in urls:
         feed = feedparser.parse(url)
 
-        log(f"{tag} parsed: {url} -> {len(feed.entries)} entries")
+        for e in feed.entries[:10]:
+            text = (e.title + " " + getattr(e, "summary", "")).lower()
 
-        for entry in feed.entries[:5]:
-            news.append({
-                "title": entry.get("title", ""),
-                "link": entry.get("link", ""),
-                "summary": entry.get("summary", "")
+            items.append({
+                "title": e.title,
+                "link": e.link,
+                "score": score_item(text)
             })
 
-    log(f"{tag} total collected: {len(news)}")
-    return news
+    return items
 
 
-# ---------------------------
-# 3. MAIN FLOW
-# ---------------------------
+# ----------------------------
+# BUILD REPORT
+# ----------------------------
+def build_report(items):
+    items = sorted(items, key=lambda x: x["score"], reverse=True)
+
+    report = "🛡️ GÜNLÜK UGV & TAKTİK SİSTEM BÜLTENİ\n\n"
+
+    count = 0
+
+    for item in items:
+        if item["score"] < 3:
+            continue
+
+        count += 1
+
+        report += f"🔹 {item['title']}\n"
+        report += f"📊 Önem Skoru: {item['score']}\n"
+        report += f"🔗 {item['link']}\n\n"
+
+        if count >= 10:
+            break
+
+    if count == 0:
+        report += "Bugün yüksek öncelikli UGV / sensör haberi bulunamadı.\n"
+
+    return report
+
+
+# ----------------------------
+# MAIN
+# ----------------------------
 def run():
-    log("bot started")
+    print("bot started")
 
-    try:
-        # RSS COLLECT
-        ugv_news = fetch_rss(UGV_RSS, "UGV")
-        eo_news = fetch_rss(EO_IR_RSS, "EO/IR")
+    ugv = fetch(UGV_RSS)
+    eo = fetch(EO_IR_RSS)
 
-        all_news = ugv_news + eo_news
+    all_items = ugv + eo
 
-        log(f"total news collected: {len(all_news)}")
+    print(f"items collected: {len(all_items)}")
 
-        if len(all_news) == 0:
-            send("⚠️ Bugün veri bulunamadı (RSS boş)")
-            return
+    report = build_report(all_items)
 
-        log("calling OpenAI analysis")
+    send(report)
 
-        # AI ANALYSIS
-        report = generate_brief(all_news)
-
-        log("OpenAI response received")
-
-        # TELEGRAM SEND
-        send(report)
-
-        log("telegram message sent")
-
-    except Exception as e:
-        error_msg = f"❌ BOT ERROR: {str(e)}"
-        log(error_msg)
-
-        # fallback telegram error message
-        try:
-            send(error_msg)
-        except:
-            pass
+    print("sent to telegram")
 
 
-# ---------------------------
-# 4. ENTRY POINT
-# ---------------------------
 if __name__ == "__main__":
     run()
