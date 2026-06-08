@@ -3,159 +3,126 @@ import hashlib
 
 from sources import UGV_RSS, EO_IR_RSS, TR_DEFENSE_RSS, UAS_UGV_CROSSOVER_RSS
 from telegram import send
+from entities import extract_company, extract_country, classify_system
 
 
 # =========================
-# KEYWORDS (INTELLIGENCE MODEL)
+# KEYWORDS
 # =========================
-
-UGV_KEYWORDS = [
-    "ugv", "ground vehicle", "unmanned ground",
-    "autonomous vehicle", "robotic vehicle", "land robot"
-]
-
-EOIR_KEYWORDS = [
-    "eo/ir", "electro-optical", "infrared", "thermal",
-    "camera", "sensor", "surveillance", "imaging"
-]
-
-STRATEGIC_KEYWORDS = [
-    "combat", "military", "army", "defense",
-    "tactical", "battlefield"
-]
-
-HIGH_VALUE_ENTITIES = [
-    "rheinmetall", "aselsan", "qinetiq",
-    "bae systems", "knds", "general dynamics"
-]
+UGV_KEYWORDS = ["ugv", "ground vehicle", "robotic vehicle"]
+EOIR_KEYWORDS = ["eo/ir", "thermal", "infrared", "camera"]
+MIL_KEYWORDS = ["military", "defense", "army", "combat"]
 
 
-# =========================
-# NORMALIZE TITLE
-# =========================
-def normalize(text):
-    return " ".join(text.lower().split())
-
-
-# =========================
-# DEDUP KEY (HASH BASED)
-# =========================
-def make_hash(title):
-    return hashlib.md5(title.encode("utf-8")).hexdigest()
-
-
-# =========================
-# SCORING v2
-# =========================
+# -------------------------
 def score(text):
-    text = text.lower()
-
+    t = text.lower()
     s = 0
 
-    # UGV relevance
     for k in UGV_KEYWORDS:
-        if k in text:
+        if k in t:
             s += 4
 
-    # EO/IR relevance
     for k in EOIR_KEYWORDS:
-        if k in text:
+        if k in t:
             s += 3
 
-    # Military context
-    for k in STRATEGIC_KEYWORDS:
-        if k in text:
+    for k in MIL_KEYWORDS:
+        if k in t:
             s += 2
 
-    # High-value companies boost
-    for k in HIGH_VALUE_ENTITIES:
-        if k in text:
-            s += 5
+    company, _ = extract_company(t)
+    if company:
+        s += 5
 
     return s
 
 
-# =========================
-# FETCH RSS
-# =========================
-def fetch(urls, source_name):
+# -------------------------
+def hash_id(text):
+    return hashlib.md5(text.encode()).hexdigest()
+
+
+# -------------------------
+def fetch(urls, source):
     items = []
 
     for url in urls:
         feed = feedparser.parse(url)
 
         for e in feed.entries[:15]:
-            title = normalize(e.title)
-            summary = normalize(getattr(e, "summary", ""))
-
-            full_text = title + " " + summary
+            text = e.title + " " + getattr(e, "summary", "")
 
             items.append({
-                "id": make_hash(title),
+                "id": hash_id(e.title),
                 "title": e.title,
                 "link": e.link,
-                "score": score(full_text),
-                "source": source_name
+                "text": text,
+                "source": source,
+                "score": score(text)
             })
 
     return items
 
 
-# =========================
-# DEDUPLICATION ENGINE
-# =========================
-def deduplicate(items):
+# -------------------------
+def dedup(items):
     seen = {}
-    merged = {}
+    out = []
 
-    for item in items:
-        _id = item["id"]
-
-        if _id not in seen:
-            seen[_id] = True
-            merged[_id] = item
+    for i in items:
+        if i["id"] not in seen:
+            seen[i["id"]] = i
+            out.append(i)
         else:
-            # duplicate found → boost score
-            merged[_id]["score"] += 2
+            seen[i["id"]]["score"] += 2
 
-    return list(merged.values())
+    return out
 
 
-# =========================
-# REPORT BUILDER
-# =========================
+# -------------------------
+def enrich(item):
+    text = item["text"]
+
+    company, country = extract_company(text)
+    sys_type = classify_system(text)
+
+    item["company"] = company
+    item["country"] = country
+    item["system"] = sys_type
+
+    return item
+
+
+# -------------------------
 def build_report(items):
     items = sorted(items, key=lambda x: x["score"], reverse=True)
 
-    report = "🛡️ UGV INTELLIGENCE REPORT v2\n\n"
+    report = "🧠 UGV INTELLIGENCE REPORT v3\n\n"
 
-    count = 0
+    for i in items[:12]:
 
-    for i in items:
+        i = enrich(i)
+
         if i["score"] < 5:
             continue
 
-        count += 1
-
         report += f"🔹 {i['title']}\n"
-        report += f"📊 Intelligence Score: {i['score']}\n"
-        report += f"🌐 Source: {i['source']}\n"
+        report += f"📊 Score: {i['score']}\n"
+        report += f"🤖 System: {i['system']}\n"
+
+        if i["company"]:
+            report += f"🏭 Company: {i['company']}\n"
+
+        report += f"🌍 Country: {i['country']}\n"
         report += f"🔗 {i['link']}\n\n"
-
-        if count >= 12:
-            break
-
-    if count == 0:
-        report += "No high-value intelligence signals today.\n"
 
     return report
 
 
-# =========================
-# MAIN PIPELINE
-# =========================
+# -------------------------
 def run():
-    print("UGV INTEL v2 starting...")
+    print("INTEL v3 starting...")
 
     all_items = []
 
@@ -164,19 +131,17 @@ def run():
     all_items += fetch(TR_DEFENSE_RSS, "TR")
     all_items += fetch(UAS_UGV_CROSSOVER_RSS, "UAS")
 
-    print(f"raw items: {len(all_items)}")
+    print("raw:", len(all_items))
 
-    # DEDUP STEP
-    clean_items = deduplicate(all_items)
+    clean = dedup(all_items)
 
-    print(f"after dedup: {len(clean_items)}")
+    print("dedup:", len(clean))
 
-    # REPORT
-    report = build_report(clean_items)
+    report = build_report(clean)
 
     send(report)
 
-    print("sent to telegram")
+    print("done")
 
 
 if __name__ == "__main__":
